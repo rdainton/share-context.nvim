@@ -22,15 +22,34 @@ local function get_buffer_path()
   return buffer_path, nil
 end
 
-local function get_git_root()
-  local git_root = vim.fn.system 'git rev-parse --show-toplevel'
-  local has_shell_error = vim.v.shell_error ~= 0
+local function get_buffer_dir()
+  local buffer_path, err = get_buffer_path()
+  if err then
+    return nil, err
+  end
 
-  if has_shell_error then
+  return vim.fs.dirname(buffer_path) .. '/', nil
+end
+
+local function in_git_repo()
+  local cmd = { 'git', 'rev-parse', '--is-inside-work-tree' }
+  local opts = { stdout = false, stderr = false }
+  local result = vim.system(cmd, opts):wait()
+  return result.code == 0
+end
+
+local function get_git_root()
+  local cmd = { 'git', 'rev-parse', '--show-toplevel' }
+  local opts = { text = true }
+  local result = vim.system(cmd, opts):wait()
+
+  if result.code ~= 0 then
     return nil, 'Failed to resolve git root'
   end
 
-  return vim.trim(git_root), nil
+  local stdout = (result.stdout or ''):gsub('\n$', '')
+
+  return vim.trim(stdout), nil
 end
 
 local function get_selection_range()
@@ -73,7 +92,26 @@ end
 
 local M = {}
 
-function M.copy_context_absolute()
+--- @class Opts
+--- @field relative 'git' | 'cwd'
+
+--- @return Opts
+local function default_opts()
+  return { relative = in_git_repo() and 'git' or 'cwd' }
+end
+
+--- @param opts Opts? Optionally configure relative root, defaults to git root if there is one.
+function M.setup(opts)
+  M.opts = vim.tbl_deep_extend('force', default_opts(), opts or {})
+end
+
+local function ensure_opts()
+  if not M.opts then
+    M.setup()
+  end
+end
+
+function M.copy_path_absolute()
   local buffer_path, err = get_buffer_path()
   if err then
     vim.notify(err, vim.log.levels.WARN)
@@ -83,36 +121,69 @@ function M.copy_context_absolute()
   copy_context(buffer_path, get_selection_range())
 end
 
-function M.copy_context_relative()
+function M.copy_dir_absolute()
+  local buffer_dir, err = get_buffer_dir()
+  if err then
+    vim.notify(err, vim.log.levels.WARN)
+    return
+  end
+
+  copy_context(buffer_dir, nil, nil)
+end
+
+function M.copy_path_relative()
+  ensure_opts()
+
   local buffer_path, err = get_buffer_path()
   if err then
     vim.notify(err, vim.log.levels.WARN)
     return
   end
 
-  ---@cast buffer_path string
-  local relative_buffer_path = vim.fn.fnamemodify(buffer_path, ':.')
+  local relative_buffer_path = ''
+
+  if M.opts.relative == 'git' and in_git_repo() then
+    local git_root, err = get_git_root()
+    if err then
+      vim.notify(err, vim.log.levels.WARN)
+      return
+    end
+
+    ---@cast buffer_path string
+    relative_buffer_path = vim.fn.fnamemodify(buffer_path, ':s?' .. git_root .. '/??')
+  else
+    ---@cast buffer_path string
+    relative_buffer_path = vim.fn.fnamemodify(buffer_path, ':.')
+  end
 
   copy_context(relative_buffer_path, get_selection_range())
 end
 
-function M.copy_context_git_relative()
-  local buffer_path, err = get_buffer_path()
+function M.copy_dir_relative()
+  ensure_opts()
+
+  local buffer_dir, err = get_buffer_dir()
   if err then
     vim.notify(err, vim.log.levels.WARN)
     return
   end
 
-  local git_root, err = get_git_root()
-  if err then
-    vim.notify(err, vim.log.levels.WARN)
-    return
+  local relative_buffer_dir = ''
+
+  if M.opts.relative == 'git' and in_git_repo() then
+    local git_root, err = get_git_root()
+    if err then
+      vim.notify(err, vim.log.levels.WARN)
+      return
+    end
+
+    ---@cast buffer_dir string
+    relative_buffer_dir = vim.fn.fnamemodify(buffer_dir, ':s?' .. git_root .. '/??')
+  else
+    ---@cast buffer_dir string
+    relative_buffer_dir = vim.fn.fnamemodify(buffer_dir, ':.')
   end
 
-  ---@cast buffer_path string
-  local relative_buffer_path = vim.fn.fnamemodify(buffer_path, ':s?' .. git_root .. '/??')
-
-  copy_context(relative_buffer_path, get_selection_range())
+  copy_context(relative_buffer_dir, get_selection_range())
 end
-
 return M
